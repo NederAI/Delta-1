@@ -1,6 +1,6 @@
 # Delta 1 — Architecture
 
-> Hypermoderne, toekomstbestendige AI-architectuur met Europese normen & waarden als uitgangspunt. Kern: modulaire **Rust-monoliet**, **PHP-interface** via FFI, **zonder frameworks**. Dataminimalisatie, veiligheid-by-design, uitlegbaarheid en controleerbaarheid staan centraal.
+> Hypermoderne, toekomstbestendige AI-architectuur met Europese normen & waarden als uitgangspunt. Kern: modulaire **Rust-monoliet**, **PHP-interface** via FFI, **zonder frameworks**. De nieuwste iteratie introduceert consent-gedreven inferentiecontext, deterministische routing, fairness/DP-gates en exporteerbare modeldocumentatie. Dataminimalisatie, veiligheid-by-design, uitlegbaarheid en controleerbaarheid staan centraal.
 
 ---
 
@@ -25,33 +25,34 @@
 ## 2. Systeemoeverzicht
 
 ```
-+---------------------+        FFI (C-ABI)         +---------------------+
-|     PHP Interface   |  <-----------------------> |      RUST Core      |
-|  (HTTP endpoints,   |                            |  Modular Monolith   |
-|   sessions, PDO)    |                            |  data/training/inf. |
-+----------+----------+                            +----+---+---+---+---+
-           |  HTTP (optioneel, zonder framework)        |   |   |   |
-           v                                            |   |   |   |
-        Clients                                   +-----+---+---+---+------+
- (webhooks/CLI/batch)                             |  Modules: data | train |
-                                                  |  inference | eval | api|
-                                                  +-------------+---------+
++---------------------------+   C-ABI (DeltaCode + JSON/char**)   +----------------------------+
+|       PHP Interface       | <-------------------------------->  |          RUST Core         |
+| - HTTP/CLI zonder fw      |                                    | - Modulaire monoliet        |
+| - PDO consent/audit/meta  |                                    | - Data/Training/Inferentie  |
+| - Audit ledger & tooling  |                                    | - Router, DP, WhyLog, docs  |
++------------+--------------+                                    +-----+---+---+---+---+-----+
+             |  HTTP/CLI/batch zonder framework                           |   |   |   |   |
+             v                                                            |   |   |   |   |
+        Clients & integraties                                    +-------+---+---+---+---+-------+
+                                                                  | data | training | inference |
+                                                                  | evaluation | api::ffi | common |
+                                                                  +--------------------------------+
 ```
 
 **Kernmodules (Rust)**
 
-* `data`: acquisitie, validatie, normalisatie.
-* `training`: modelbouw, hertrainen, versiebeheer.
-* `inference`: realtime/batch voorspellingen, A/B.
-* `evaluation`: metriek, bias checks, canaries.
-* `api::ffi`: FFI-export voor PHP; **enige** cross-modulaire poort.
-* `common`: config, errors, logging, telemetry.
+* `data`: bestandsingestie, hashing, datasheet-export (`export_datasheet`).
+* `training`: fairness- en DP-gates, deterministische model-id, in-memory registry + modelcard-export.
+* `inference`: consent-checks, SSM-router (tabular/text), fallback, WhyLog-hash en saliency.
+* `evaluation`: metriek/bias placeholders richting rapportages.
+* `api::ffi`: FFI-export met stabiele `DeltaCode`-statussen, `char**`-uitvoer en `delta1_free_str`.
+* `common`: config, errors, hashing, tijd, mini JSON-utils voor zero-deps parsing.
 
 **PHP-laag**
 
-* Minimalistische endpoints (of alleen CLI) die FFI-functies aanroepen.
-* PDO (named parameters) voor opslag/metadata.
-* Geen frameworks; eenvoudige router/dispatcher.
+* Minimalistische HTTP/CLI-entrypoints die FFI-functies (`delta1_*`) aanroepen en `DeltaCode` mappen naar HTTP-status.
+* PDO (named parameters) voor consent, audit ledger en metadata.
+* Header/preload-strategie voor veilige `FFI::load`, plus char-pointerbeheer (`delta1_free_str`).
 
 ---
 
@@ -59,9 +60,10 @@
 
 * **Modulaire monoliet**: grenzen per domein, interne API’s; geen shared mutable state buiten modulegrenzen.
 * **Hexagonaal**: domein logica ≠ infrastructuur; repositories als traits, implementaties in `infrastructure/`.
-* **Contract-first** FFI: stabiele C-ABI, versie tags, semver.
-* **Deterministisch & reproduceerbaar**: vaste seeds, vastgepinde toolchains.
-* **Observability-first**: structured logs, metrics, traces (zonder externe frameworks: eigen, lichtgewicht appenders).
+* **Contract-first** FFI: stabiele C-ABI, `DeltaCode`-statussen, `char**`-uitvoer, semver (`delta1_api_version`).
+* **Consent & governance by design**: inferentie vereist `purpose_id` + `subject_id`, audit-ready WhyLog-hash.
+* **Deterministisch & reproduceerbaar**: vaste seeds, vastgepinde toolchains, deterministische id-hashing.
+* **Observability-first**: structured logs, metrics, traces (zonder externe frameworks: eigen, lichtgewicht appenders) + document-export (modelcard/datasheet).
 
 ---
 
@@ -76,12 +78,12 @@
 
 ## 5. Datastromen
 
-1. **Acquisitie** (CSV/JSON/stream) → schemavalidatie → normalisatie → `Dataset` registreren.
-2. **Training**: selecteer dataset+config → train → produceer `ModelVersion` (artefact + metadata).
-3. **Evaluatie**: offline metrics (ROC/PR/AUC/F1), fairness-testen, canary-set.
-4. **Publicatie**: model naar `ACTIVE` met versie-alias (bv. `current`).
-5. **Inferentie**: request → validatie → model-aanroep → post-checks (confidence/thresholds) → antwoord + logging.
-6. **Monitoring**: datadrift, performancedrift, incidentlog.
+1. **Acquisitie & datasheet**: CSV/JSON/stream → schemavalidatie → normalisatie → hashing → `DatasetId` (string) via `delta1_data_ingest` → `export_datasheet` voor audittrail.
+2. **Training & policies**: kies dataset + config → `training::service::train` → DP/fairness-gates → `ModelVersion` (artefactpad + metadata) in in-memory registry.
+3. **Activatie**: `delta1_load_model` laadt (eventueel specifieke versie) en registreert actief model voor inferentie.
+4. **Inferentie met context**: `delta1_infer_with_ctx(purpose, subject, payload)` → consent-check → SSM-router (tabular/text) → fallback indien nodig → JSON-respons met route, confidence, WhyLog-hash.
+5. **Documentatie**: `delta1_export_model_card` en `delta1_export_datasheet` leveren governancedocumenten (JSON) richting PHP/ops.
+6. **Monitoring & audit**: latencies, drift, incidentlog, auditledger met WhyLog-hash en consentbeslissingen.
 
 ---
 
@@ -93,9 +95,12 @@
 
   * `datasets(id, hash, schema_json, created_at)`
   * `models(id, version, created_at, metrics_json, bias_json, card_json, status)`
-  * `runs(id, type, started_at, finished_at, meta_json, ok)`
+  * `consent(subject_hash, purpose_id, status, expires_at)`
+  * `audit_log(id, event_time, model_id, version, purpose_id, subject_ref, merkle_root, whylog_hash)`
+  * `runs(id, type, started_at, finished_at, meta_json, ok)` *(optioneel)*
   * `predictions(id, model_id, req_hash, result_hash, ts, meta_json)` *(eventueel geaggregeerd)*
-* Artefacten op filesystem (`/var/delta1/models/<id>-<version>.bin`) of S3-compatibel **binnen EU**.
+* Artefacten op filesystem (`/var/delta1/models/<id>/<version>/model.bin`) + tokenizers; datasheets/modelcards als JSON.
+* Huidige implementatie houdt modelregistry/datasheets in-memory; persistente repos worden later aangesloten op dezelfde contracts.
 
 **Backup & retentie**
 
@@ -108,9 +113,9 @@
 * **In-transit** TLS (terminatie buiten scope of mTLS tussen componenten).
 * **At-rest**: disks/artefacten versleuteld; secrets als env-vars + sealed files.
 * **Least-privilege** gebruikers/rollen; geen world-writable paths.
-* **FFI-hardened**: alleen FFI-veilige types; bounds-checks; geen ongetype pointeraritmetiek.
+* **FFI-hardened**: alleen FFI-veilige types; bounds-checks; `char**` output met eigenaarschap + verplicht `delta1_free_str`.
 * **Input-sanitatie** en schema-validatie in `data` module.
-* **Audittrail**: onmutable append-log voor gevoelige operaties (train/publish).
+* **Audittrail**: onmutable append-log voor gevoelige operaties (train/publish/infer) met WhyLog-hash.
 
 ---
 
@@ -131,7 +136,7 @@
   * *Bias & non-discrimination*: representativiteit, disparate impact, equalized odds waar relevant.
   * *Traceability*: alle trainingsruns, datasets, hyperparams en commits gelogd.
 * **Retentie & doeleinden**: bewaartermijnen per dataset; automatische purges.
-* **Consent/contract**: consent-status deel van datamodel; geen gebruik buiten scope.
+* **Consent/contract**: consent-status deel van datamodel (`purpose_id`, gehashte `subject_id`, status=`granted|denied|expired`); geen gebruik buiten scope.
 
 ---
 
@@ -151,6 +156,7 @@
 * **Structured logging** (JSON): `ts, req_id, actor, module, event, dur_ms`.
 * **Metrics**: latency, QPS, error ratio, cache hitrate, drift-scores.
 * **Traces**: eenvoudige span-ids door FFI heen (propagatie in headers/ctx).
+* **Audit events**: WhyLog-hash + consentbeslissing naar append-only ledger.
 * **SLO’s**: p95 latency (inferentie), beschikbaarheid, foutbudget.
 
 ---
@@ -169,44 +175,57 @@
 **Naming & versies**
 
 * Symboolprefix `delta1_`; semver exporttabel (`delta1_api_version()`).
-* Alleen POD-structs; strings als `const char*` (UTF-8), eigenaarschap gedocumenteerd.
+* Alleen POD-structs; strings als `const char*` (UTF-8), eigenaarschap gedocumenteerd (`delta1_free_str`).
+* Statuscodes volgens `DeltaCode`: `0=Ok`, `1=NoConsent`, `2=PolicyDenied`, `3=ModelMissing`, `4=InvalidInput`, `5=Internal`.
 
 **Voorbeeld**
 
 ```c
 // Header (voor PHP FFI)
-unsigned int delta1_api_version(void);
+const char* delta1_api_version(void); // "1.0.0"
 
-unsigned int delta1_data_ingest(const char* path, const char* schema_json);
-/* return dataset_id (>0) of 0 bij fout */
+int delta1_data_ingest(const char* filepath, char** out_dataset_id);
+// DeltaCode; bij succes wordt *out_dataset_id toegewezen (caller vrijgeven)
 
-unsigned int delta1_train(unsigned int dataset_id, const char* config_json);
-/* return model_id */
+int delta1_train(const char* dataset_id, const char* train_cfg_json, char** out_model_id);
+// DeltaCode; model-id als string terug via out-parameter
 
-const char*  delta1_infer(unsigned int model_id, const char* input_json);
-/* return JSON; call delta1_free_str(ptr) when done */
+int delta1_load_model(const char* model_id, const char* version_opt);
+// DeltaCode; houdt actief model in geheugen voor inferentie
 
-void         delta1_free_str(const char* ptr);
+const char* delta1_infer_with_ctx(
+    const char* purpose_id,
+    const char* subject_id,
+    const char* input_json
+);
+// JSON-response (WhyLog, route, confidence); caller moet free doen
+
+const char* delta1_export_model_card(const char* model_id);
+const char* delta1_export_datasheet(const char* dataset_id);
+
+void delta1_free_str(const char* ptr);
 ```
 
 ---
 
 ## 13. PHP-laag (zonder frameworks)
 
-* **Endpoints/CLI** roepen FFI-functies aan; validatie + auth in PHP.
-* **PDO** met named parameters voor meta-opslag en audit.
+* **Endpoints/CLI** roepen `delta1_data_ingest/train/load_model/infer_with_ctx/export_*` aan; validatie + auth in PHP.
+* **DeltaCode → HTTP**: mapping (`0=200`, `1=403`, `2=422/403`, `3=404`, `4=400`, `5=500`).
+* **PDO** met named parameters voor consent, audit-log, metadata.
+* **FFI-beheer**: preload header, `FFI::load`, `FFI::string` + `delta1_free_str` wrappers voor alle `const char*`-returns.
 * **Rate-limiting** en simpele tokenauth (liefst mTLS voor interne calls).
-* **Geen globale staat**; alles via request-scope.
+* **Geen globale staat**; alles via request-scope (actieve model-id in Rust via `delta1_load_model`).
 
 ---
 
 ## 14. Teststrategie
 
 * **Unit**: per module (Rust `cargo test`).
-* **FFI-contracttests**: tegen de cdylib met golden headers.
-* **Integratie**: PHP → FFI → Rust → opslag.
-* **E2E**: ingest → train → publish → infer → monitor.
-* **Conformiteit**: DPIA-checklist, dataminimalisatie-linting (schema-diffs), bias-testen.
+* **FFI-contracttests**: cdylib ↔ header; `char**`-outparams, `DeltaCode`-mapping, `infer_with_ctx` JSON.
+* **Integratie**: PHP → FFI → Rust → consent/audit/artefact.
+* **E2E**: ingest → train → load_model → infer_with_ctx → export docs → monitor.
+* **Conformiteit**: DPIA-checklist, dataminimalisatie-linting (schema-diffs), bias-testen, consent-deny paths.
 
 ---
 
@@ -258,14 +277,14 @@ void         delta1_free_str(const char* ptr);
 
 * [ ] Evals ≥ drempels
 * [ ] Fairness OK / mitigaties vastgelegd
-* [ ] Modelkaart ingevuld
+* [ ] Modelkaart + datasheet geëxporteerd (`delta1_export_*`)
 * [ ] Rollback-punt beschikbaar
 
 **Operations**
 
 * [ ] Drift-alerts actief
 * [ ] Backups recent getest
-* [ ] Audittrail intact
+* [ ] Audittrail intact (WhyLog-hash + consentstatus)
 * [ ] Retentie en purges lopen
 
 ---
@@ -274,19 +293,35 @@ void         delta1_free_str(const char* ptr);
 
 ```rust
 #[no_mangle]
-pub extern "C" fn delta1_api_version() -> u32 { 1 }
+pub extern "C" fn delta1_api_version() -> *const c_char { VERSION.as_ptr() }
 
 #[no_mangle]
-pub extern "C" fn delta1_data_ingest(path: *const c_char, schema: *const c_char) -> u32 { /* ... */ }
+pub extern "C" fn delta1_data_ingest(path: *const c_char, out_id: *mut *const c_char) -> i32 {
+    if path.is_null() || out_id.is_null() {
+        return DeltaCode::InvalidInput as i32;
+    }
+    match core_data_ingest(cstr(path), "{}") {
+        Ok(id) => assign_out_string(out_id, id.into_inner()),
+        Err(err) => err.code as i32,
+    }
+}
 
 #[no_mangle]
-pub extern "C" fn delta1_train(dataset_id: u32, cfg: *const c_char) -> u32 { /* ... */ }
+pub extern "C" fn delta1_train(
+    dataset_id: *const c_char,
+    cfg_json: *const c_char,
+    out_model_id: *mut *const c_char,
+) -> i32 { /* DeltaCode + out-param */ }
 
 #[no_mangle]
-pub extern "C" fn delta1_infer(model_id: u32, input: *const c_char) -> *const c_char { /* ... */ }
+pub extern "C" fn delta1_infer_with_ctx(
+    purpose_id: *const c_char,
+    subject_id: *const c_char,
+    input_json: *const c_char,
+) -> *const c_char { /* JSON (WhyLog, route, confidence) */ }
 
 #[no_mangle]
-pub extern "C" fn delta1_free_str(ptr: *const c_char) { /* ... */ }
+pub extern "C" fn delta1_free_str(ptr: *const c_char) { /* consume CString::from_raw */ }
 ```
 
 ---
