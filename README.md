@@ -69,6 +69,7 @@ De PHP-laag vormt een dunne schil rond de Rust-bibliotheek:
 * **`docs/`** – verdiepende documentatie:
   * `architecture.md` voor de algemene ontwerpprincipes,
   * `modules.md` met moduleoverzichten,
+  * `agent-model-roadmap.md` als roadmap voor agent-modellen en governance,
   * `php-ffi.md` als handleiding voor het koppelen van PHP aan Rust,
   * `rust-core.md` met aanvullende crate-details.
 * **`rust-core/README.md`** – verduidelijkt crate-specifieke richtlijnen en buildinstructies.
