@@ -2,17 +2,18 @@
 
 ## 1. Verwerkingsactiviteiten
 - **Doel:** leveren van AI-ondersteuning voor medewerkers en klanten met informatievoorziening, samenvattingen en automatisering.
-- **Betrokken systemen:** AI-assistent services (`delta1_*`), CRM/ticketing, interne kennisbanken, consentstore, monitoring/logging.
-- **Gegevensbronnen:** publieke documentatie, interne beleidsdocumenten en FAQ’s, metadata van interacties, CRM-ticketdata.
+- **Betrokken systemen:** AI-assistent services (`delta1_*`), interne service-portal, interne kennisbanken, consentstore, monitoring/logging.
+- **Gegevensbronnen:** publieke documentatie, interne beleidsdocumenten en FAQ’s, metadata van interacties, invoer uit de interne service-portal.
+- **Integratiebeleid:** alle componenten draaien binnen de Delta 1-omgeving; er worden geen externe SaaS-diensten gekoppeld.
 
 ## 2. Categorieën persoonsgegevens
 - Identificatiegegevens: naam, e-mailadres, telefoonnummer, klantnummer.
-- Contacthistorie: ticketcontext en vrije tekst (mogelijk PII, incidenteel gevoelige data zoals gezondheid of financiën).
+- Contacthistorie: aanvraagcontext en vrije tekst (mogelijk PII, incidenteel gevoelige data zoals gezondheid of financiën).
 - Gebruiksmetadata: tijdstip, kanaal, type vraag, tool calls.
 
 ## 3. Rechtsgrond en consent
-- **Lawful basis:** contractuele noodzaak voor bestaande klanten en expliciete opt-in via CMP voor overige gebruikers.
-- **Consentbeheer:** consent-banner/opt-in beheerd via CMP (bijv. OneTrust); synchronisatie naar centrale consentstore via API-calls; AI-assistent raadpleegt store real-time of via periodieke sync.
+- **Lawful basis:** contractuele noodzaak voor bestaande klanten en expliciete opt-in via de interne consentmodule voor overige gebruikers.
+- **Consentbeheer:** consent-banner/opt-in beheerd via de interne consentmodule; synchronisatie naar centrale consentstore via interne API-calls; AI-assistent raadpleegt store real-time of via periodieke sync.
 - **NoConsent-beleid:** `DeltaCode::NoConsent` blokkeert toegang tot interne data en levert generieke antwoorden; gemapt naar HTTP 403 met auditlogging.
 
 ## 4. Risicoanalyse
@@ -35,17 +36,17 @@
 - Rate limiting en commandbudget-controle om misbruik te voorkomen.
 - Toegangsbeheer geïntegreerd met bestaande IAM-oplossingen.
 - Monitoring op policy-overtredingen, escalaties en consent-violations.
-- Incidentresponsplan gekoppeld aan ticketingsysteem met correlatie-ID’s voor herleidbaarheid zonder inhoudelijke logging.
+- Incidentresponsplan gekoppeld aan de interne operations-console met correlatie-ID’s voor herleidbaarheid zonder inhoudelijke logging.
 
 ## 7. Betrokkenenrechten
-- Ondersteuning voor inzage-, correctie- en verwijderingsverzoeken via CRM/ticketing.
+- Ondersteuning voor inzage-, correctie- en verwijderingsverzoeken via de interne service-portal.
 - Consentstore houdt gehashte subject-id’s bij om verzoeken efficiënt af te handelen.
 - DeltaCode-logica documenteert geweigerde verzoeken zodat het bezwaarrecht kan worden nageleefd.
 
 ## 8. HITL en governance
 - Escalatiepad naar 1e lijn support en 2e lijn domeinspecialisten; eindverantwoordelijkheid bij afdelingsmanager.
-- Ticketingsysteem (Jira Service Management, ServiceNow of Zendesk) vormt de primaire tooling; specialistensystemen (ITSM, HR-portal, juridische tools) voor tweede lijn.
-- Audit trail via ticket-ID waarin AI-actie en menselijke beoordeling worden vastgelegd; versies en statuswissels worden automatisch bijgehouden.
+- De interne operations-console vormt de primaire tooling; interne specialistische modules (ITSM, HR-portaal, juridische workflow) ondersteunen de tweede lijn.
+- Audit trail via aanvraag-ID waarin AI-actie en menselijke beoordeling worden vastgelegd; versies en statuswissels worden automatisch bijgehouden.
 
 ## 9. Openstaande acties voor Gate 0
 - Formele goedkeuring van DPO en CIO/CTO op dit DPIA-lite document.
