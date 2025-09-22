@@ -34,12 +34,28 @@ pub fn ingest_file(path: &str, schema_json: &str) -> DeltaResult<DatasetId> {
         // TODO: Apply normalisation rules (trim, lowercase, PII strategies) before hashing.
     }
 
-    let dataset_id = DatasetId(hasher.finish32());
-    let dataset = Dataset::new(dataset_id, schema_json.to_string(), time::now_ms(), rows);
+    let dataset_id = DatasetId::new(format!("ds-{}", hasher.finish_hex()));
+    let dataset = Dataset::new(
+        dataset_id.clone(),
+        schema_json.to_string(),
+        time::now_ms(),
+        rows,
+    );
 
     // TODO: Persist dataset metadata via DataRepo once wiring is in place.
 
     Ok(dataset.id)
+}
+
+/// Export a placeholder datasheet for the given dataset identifier.
+pub fn export_datasheet(dataset_id: &DatasetId) -> DeltaResult<String> {
+    let sheet = format!(
+        "{{\"dataset_id\":\"{}\",\"schema\":\"inline\",\"retention_days\":30,\"created_ms\":{}}}",
+        crate::common::json::escape(dataset_id.as_str()),
+        time::now_ms()
+    );
+
+    Ok(sheet)
 }
 
 // TODO: Provide a dry-run API for validation without persistence side-effects.

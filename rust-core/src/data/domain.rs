@@ -6,11 +6,22 @@
 use crate::common::error::DeltaResult;
 
 /// Opaque identifier for datasets.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct DatasetId(pub u32);
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct DatasetId(String);
 
 impl DatasetId {
-    pub fn raw(&self) -> u32 {
+    /// Construct a dataset identifier from a string slice.
+    pub fn new<S: Into<String>>(value: S) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrow the identifier as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume the identifier and return the owned string.
+    pub fn into_inner(self) -> String {
         self.0
     }
 }
@@ -37,18 +48,6 @@ pub trait DataRepo {
     fn put_dataset(&self, dataset: &Dataset) -> DeltaResult<()>;
     fn get_dataset(&self, id: DatasetId) -> DeltaResult<Dataset>;
     // TODO: Add streaming read/write APIs to avoid loading entire datasets in memory.
-}
-
-impl From<u32> for DatasetId {
-    fn from(value: u32) -> Self {
-        DatasetId(value)
-    }
-}
-
-impl From<DatasetId> for u32 {
-    fn from(value: DatasetId) -> Self {
-        value.0
-    }
 }
 
 impl Dataset {

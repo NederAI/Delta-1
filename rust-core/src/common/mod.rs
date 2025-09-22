@@ -6,6 +6,7 @@ pub mod buf;
 pub mod config;
 pub mod error;
 pub mod ids;
+pub mod json;
 pub mod log;
 pub mod time;
 
