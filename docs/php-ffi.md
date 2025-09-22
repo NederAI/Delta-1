@@ -1,31 +1,34 @@
-# Delta 1 — php-ffi.md
+# Delta 1 — PHP ↔ Rust via FFI
 
-> Koppeling tussen PHP (zonder framework) en de Rust-kern via **FFI**. Focus op eenvoud, veiligheid, performance en EU-conforme inzet.
+> Handleiding voor het koppelen van de Rust `cdylib` aan PHP 7.4+ zonder
+> frameworks. Beschrijft de actuele C-ABI (`delta1_*`) zoals geïmplementeerd in
+> `rust-core/src/api/ffi.rs`.
 
 ---
 
 ## 1) Prereqs
 
-* **PHP ≥ 7.4** met FFI.
-* **Rust** (stable toolchain).
+* **PHP ≥ 7.4** met FFI-extensie.
+* **Rust** (stable toolchain) + `cargo`.
 * OS: Linux (`.so`), macOS (`.dylib`), Windows (`.dll`).
 
 **php.ini (aanbevolen)**
 
-* **Development (CLI):**
+* **Development/CLI**
 
   ```ini
   ffi.enable = true
   ```
-* **Production (FPM/Apache):** minimaliseer aanvalsvlak
+
+* **Production (FPM/CLI met preload)** – verklein het aanvalsvlak:
 
   ```ini
   ffi.enable = preload
   opcache.preload = /var/www/preload.php
-  ; In preload.php: uitsluitend whitelisted headers/libraries laden
   ```
 
-  > In productie vermijd `FFI::cdef()`; gebruik **preload + FFI::load()** met vaste header.
+  > In productie FFI-definities preloaden via `FFI::load()` in plaats van
+  > dynamisch `FFI::cdef()`.
 
 ---
 
@@ -41,275 +44,216 @@ edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
-
-[dependencies]
-# voeg alleen strikt noodzakelijke crates toe
 ```
 
-**lib.rs (C-ABI)**
+De relevante exports bevinden zich in `rust-core/src/api/ffi.rs`. Kernpunten:
 
 ```rust
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
-
-#[no_mangle] pub extern "C" fn delta1_api_version() -> u32 { 1 }
+#[no_mangle]
+pub extern "C" fn delta1_api_version() -> *const c_char { /* OnceLock<CString> */ }
 
 #[no_mangle]
-pub extern "C" fn delta1_data_ingest(path: *const c_char, schema: *const c_char) -> u32 {
-    let path   = unsafe { CStr::from_ptr(path)   }.to_string_lossy();
-    let schema = unsafe { CStr::from_ptr(schema) }.to_string_lossy();
-    // TODO: call into data::ingest_file(&path, &schema)
-    1 /* dataset_id > 0 on success, 0 on failure */
-}
+pub extern "C" fn delta1_data_ingest(
+    filepath: *const c_char,
+    out_dataset_id: *mut *const c_char,
+) -> i32 { /* DeltaCode::Ok bij succes */ }
 
 #[no_mangle]
-pub extern "C" fn delta1_train(dataset_id: u32, cfg: *const c_char) -> u32 {
-    let _cfg = unsafe { CStr::from_ptr(cfg) }.to_string_lossy();
-    // TODO: call training::train(...)
-    1 /* model_id */
-}
+pub extern "C" fn delta1_train(
+    dataset_id: *const c_char,
+    train_cfg_json: *const c_char,
+    out_model_id: *mut *const c_char,
+) -> i32 { /* DeltaCode */ }
 
 #[no_mangle]
-pub extern "C" fn delta1_infer(model_id: u32, input: *const c_char) -> *const c_char {
-    let _input = unsafe { CStr::from_ptr(input) }.to_string_lossy();
-    // TODO: call inference::infer(...)-> JSON string
-    let out = CString::new(r#"{"ok":true}"#).unwrap();
-    out.into_raw() // caller moet vrijgeven
-}
+pub extern "C" fn delta1_load_model(
+    model_id: *const c_char,
+    version: *const c_char,
+) -> i32 { /* registreert actief model */ }
 
 #[no_mangle]
-pub extern "C" fn delta1_free_str(ptr: *const c_char) {
-    if ptr.is_null() { return; }
-    unsafe { let _ = CString::from_raw(ptr as *mut c_char); }
-}
+pub extern "C" fn delta1_infer_with_ctx(
+    purpose_id: *const c_char,
+    subject_id: *const c_char,
+    input_json: *const c_char,
+) -> *const c_char { /* JSON inclusief whylog_hash */ }
+
+#[no_mangle]
+pub extern "C" fn delta1_export_model_card(model_id: *const c_char) -> *const c_char;
+#[no_mangle]
+pub extern "C" fn delta1_export_datasheet(dataset_id: *const c_char) -> *const c_char;
+#[no_mangle]
+pub extern "C" fn delta1_free_str(ptr: *const c_char);
 ```
+
+Alle functies die strings teruggeven gebruiken heap-gealloceerde `CString`s.
+Callers **moeten** `delta1_free_str` aanroepen, behalve voor `delta1_api_version`
+(dat is een pointer naar een intern beheerde `CString`).
 
 **Build**
 
 ```bash
+cd rust-core
 cargo build --release
-# Target:
-#   Linux:  target/release/libdelta1.so
-#   macOS:  target/release/libdelta1.dylib
-#   Win:    target/release/delta1.dll
+# Resultaat (Linux): target/release/libdelta1.so
 ```
 
 ---
 
 ## 3) PHP: laden & wrappers
 
-**Bestand:** `php-interface/src/bootstrap.php`
+**Bootstrap (`php-interface/src/bootstrap.php`)**
 
 ```php
 <?php
 declare(strict_types=1);
 
-/**
- * Resolve platform-specifieke bestandsnaam.
- */
-function delta1_lib_path(): string {
-    $base = realpath(__DIR__ . "/../../rust-core/target/release");
-    $isWin = PHP_OS_FAMILY === 'Windows';
-    $isMac = PHP_OS_FAMILY === 'Darwin';
-    if ($isWin) return $base . DIRECTORY_SEPARATOR . "delta1.dll";
-    if ($isMac) return $base . DIRECTORY_SEPARATOR . "libdelta1.dylib";
-    return $base . DIRECTORY_SEPARATOR . "libdelta1.so";
-}
+const DELTA1_LIB = __DIR__ . '/../../rust-core/target/release/libdelta1.so';
 
-/**
- * C-prototypes (alleen in dev/CLI; in prod via FFI::load met header).
- */
 $CDEF = <<<CDEF
-unsigned int delta1_api_version(void);
-unsigned int delta1_data_ingest(const char* path, const char* schema_json);
-unsigned int delta1_train(unsigned int dataset_id, const char* config_json);
-const char*  delta1_infer(unsigned int model_id, const char* input_json);
-void         delta1_free_str(const char* ptr);
+const char* delta1_api_version(void);
+int         delta1_data_ingest(const char* filepath, char** out_dataset_id);
+int         delta1_train(const char* dataset_id,
+                        const char* train_cfg_json,
+                        char** out_model_id);
+int         delta1_load_model(const char* model_id, const char* version_opt);
+const char* delta1_infer_with_ctx(const char* purpose_id,
+                                  const char* subject_id,
+                                  const char* input_json);
+const char* delta1_export_model_card(const char* model_id);
+const char* delta1_export_datasheet(const char* dataset_id);
+void        delta1_free_str(const char* ptr);
 CDEF;
 
-$lib = delta1_lib_path();
+$ffi = FFI::cdef($CDEF, DELTA1_LIB);
+$GLOBALS['ffi'] = $ffi; // simpele globale voor voorbeelden hieronder
 
-/**
- * In productie: preload + FFI::load('delta1.h') i.p.v. cdef.
- */
-$ffi = FFI::cdef($CDEF, $lib);
-
-/** Light wrappers met veilige string-afhandeling **/
-function delta1_api_version(): int {
-    return $GLOBALS['ffi']->delta1_api_version();
+final class DeltaCode
+{
+    public const Ok = 0;
+    public const NoConsent = 1;
+    public const PolicyDenied = 2;
+    public const ModelMissing = 3;
+    public const InvalidInput = 4;
+    public const Internal = 5;
 }
 
-function delta1_data_ingest(string $path, string $schemaJson): int {
-    return $GLOBALS['ffi']->delta1_data_ingest($path, $schemaJson);
+function delta1_api_version(): string
+{
+    return FFI::string($GLOBALS['ffi']->delta1_api_version());
 }
 
-function delta1_train(int $datasetId, string $configJson): int {
-    return $GLOBALS['ffi']->delta1_train($datasetId, $configJson);
+function delta1_data_ingest(string $path, string $schemaJson = '{}'): array
+{
+    $out = FFI::new('char*');
+    $code = $GLOBALS['ffi']->delta1_data_ingest($path, FFI::addr($out));
+    if ($code !== DeltaCode::Ok) {
+        return [$code, null];
+    }
+
+    try {
+        return [$code, FFI::string($out[0])];
+    } finally {
+        $GLOBALS['ffi']->delta1_free_str($out[0]);
+    }
 }
 
-function delta1_infer(int $modelId, string $inputJson): string {
-    $ptr = $GLOBALS['ffi']->delta1_infer($modelId, $inputJson);
-    try { return FFI::string($ptr); }
-    finally { $GLOBALS['ffi']->delta1_free_str($ptr); }
+function delta1_train(string $datasetId, string $cfgJson): array
+{
+    $out = FFI::new('char*');
+    $code = $GLOBALS['ffi']->delta1_train($datasetId, $cfgJson, FFI::addr($out));
+    if ($code !== DeltaCode::Ok) {
+        return [$code, null];
+    }
+
+    try {
+        return [$code, FFI::string($out[0])];
+    } finally {
+        $GLOBALS['ffi']->delta1_free_str($out[0]);
+    }
+}
+
+function delta1_load_model(string $modelId, ?string $version = null): int
+{
+    // Lege string of "latest" ⇒ meest recente versie volgens Rust-implementatie.
+    $versionArg = $version ?? '';
+    return $GLOBALS['ffi']->delta1_load_model($modelId, $versionArg);
+}
+
+function delta1_infer_with_ctx(string $purpose, string $subject, string $payload): string
+{
+    $ptr = $GLOBALS['ffi']->delta1_infer_with_ctx($purpose, $subject, $payload);
+    try {
+        return FFI::string($ptr);
+    } finally {
+        $GLOBALS['ffi']->delta1_free_str($ptr);
+    }
+}
+
+function delta1_export_model_card(string $modelId): string
+{
+    $ptr = $GLOBALS['ffi']->delta1_export_model_card($modelId);
+    try {
+        return FFI::string($ptr);
+    } finally {
+        $GLOBALS['ffi']->delta1_free_str($ptr);
+    }
+}
+
+function delta1_export_datasheet(string $datasetId): string
+{
+    $ptr = $GLOBALS['ffi']->delta1_export_datasheet($datasetId);
+    try {
+        return FFI::string($ptr);
+    } finally {
+        $GLOBALS['ffi']->delta1_free_str($ptr);
+    }
 }
 ```
 
-**Voorbeeldgebruik (CLI)**
-
-```php
-<?php
-require __DIR__.'/src/bootstrap.php';
-
-echo "API v".delta1_api_version().PHP_EOL;
-$ds = delta1_data_ingest(__DIR__.'/data.csv', '{"type":"csv"}');
-$m  = delta1_train($ds, '{"lr":0.01,"epochs":5}');
-$out = delta1_infer($m, '{"x":[1,2,3]}');
-echo $out.PHP_EOL;
-```
+> Tip: map `DeltaCode` naar HTTP-status (`0 → 200`, `1 → 403`, `2 → 422/403`,
+> `3 → 404`, `4 → 400`, `5 → 500`) in je controllerlaag.
 
 ---
 
-## 4) Productie-header & preload (veilig)
+## 4) Productie-header & preload
 
 **`delta1.h`**
 
 ```c
 #define FFI_SCOPE "delta1"
-#define FFI_LIB   "libdelta1.so" /* pas aan per OS of absolute path */
+#define FFI_LIB   "libdelta1.so" // pas aan per OS
 
-unsigned int delta1_api_version(void);
-unsigned int delta1_data_ingest(const char* path, const char* schema_json);
-unsigned int delta1_train(unsigned int dataset_id, const char* config_json);
-const char*  delta1_infer(unsigned int model_id, const char* input_json);
-void         delta1_free_str(const char* ptr);
+const char* delta1_api_version(void);
+int         delta1_data_ingest(const char* filepath, char** out_dataset_id);
+int         delta1_train(const char* dataset_id,
+                         const char* train_cfg_json,
+                         char** out_model_id);
+int         delta1_load_model(const char* model_id, const char* version_opt);
+const char* delta1_infer_with_ctx(const char* purpose_id,
+                                  const char* subject_id,
+                                  const char* input_json);
+const char* delta1_export_model_card(const char* model_id);
+const char* delta1_export_datasheet(const char* dataset_id);
+void        delta1_free_str(const char* ptr);
 ```
 
 **`/var/www/preload.php`**
 
 ```php
 <?php
-FFI::load(__DIR__ . '/delta1.h'); // preload vaste header
+FFI::load(__DIR__ . '/delta1.h');
 ```
 
-**php.ini (prod)**
-
-```ini
-ffi.enable = preload
-opcache.preload = /var/www/preload.php
-```
-
-> Resultaat: geen runtime `FFI::cdef()`; alleen vooraf goedgekeurde symbolen.
+Met deze preload-aanpak kan runtimecode simpelweg `FFI::scope('delta1')` gebruiken
+en worden de prototypes niet dynamisch geïnterpreteerd.
 
 ---
 
-## 5) PDO (named parameters) voor metadata
+## 5) Foutafhandeling & hygiene
 
-**`php-interface/src/Database.php`**
+* Controleer altijd de `DeltaCode`-returnwaarde voordat je `FFI::string()` aanroept.
+* Roep **altijd** `delta1_free_str` aan op pointers die uit Rust terugkomen.
+* Log en audit consent/policy-fouten (`DeltaCode::NoConsent/PolicyDenied`).
+* `delta1_api_version()` hoeft niet vrijgegeven te worden.
 
-```php
-<?php
-final class Database {
-    private \PDO $pdo;
-    public function __construct(string $dsn, string $user, string $pass) {
-        $this->pdo = new \PDO($dsn, $user, $pass, [
-            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-        ]);
-    }
-
-    public function insertModel(int $modelId, string $version, string $metricsJson): void {
-        $sql = "INSERT INTO models(id, version, metrics_json) VALUES(:id,:v,:m)";
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute([':id'=>$modelId, ':v'=>$version, ':m'=>$metricsJson]);
-    }
-}
-```
-
----
-
-## 6) Memory & ownership
-
-* Strings uit Rust worden gealloceerd met `CString::into_raw()`.
-* **Altijd** vrijgeven in PHP via `delta1_free_str($ptr)`.
-* Geen pointers cachen over request-grenzen.
-* Houd cdylib **stateless** of bescherm gedeelde staat met `Mutex`/`RwLock`.
-
----
-
-## 7) Fouten & codes
-
-Conventie (simple):
-
-* `0` ⇒ fout; `>0` ⇒ OK id.
-* String-API’s retourneren JSON met `{"ok":false,"code":50,"msg":"..."}`.
-
-Uitbreiding (optioneel):
-
-```c
-/* Haal laatste fout op als JSON, thread-local in Rust */
-const char* delta1_last_error(void);
-```
-
----
-
-## 8) Beveiliging
-
-* Minimaliseer export: alleen noodzakelijke symbolen.
-* Valideer **alle** input (pad, JSON schema).
-* Hardened build (strip symbols, LTO waar mogelijk).
-* Prod: `ffi.enable=preload`, vaste pad/naam library, geen `cdef`.
-* Scheid gebruikersrechten; FPM gebruiker heeft alleen leesrecht op cdylib.
-
----
-
-## 9) Performance-tips
-
-* Prefer **batch infer** paden (JSON array in één call).
-* Vermijd onnodige allocaties; hergebruik buffers in Rust.
-* Gebruik vaste seeds en pinned toolchains voor reproduceerbaarheid.
-* Warm-up stap (lazy init) per proces.
-
----
-
-## 10) Testen
-
-* **Unit (Rust):** `cargo test` per module.
-* **Contract (PHP→FFI):** controleer symbolen + prototypes (dev: `FFI::scope`).
-* **Integratie:** ingest→train→infer→assert JSON schema.
-* **Leak checks:** in tests altijd `delta1_free_str()` aanroepen.
-
----
-
-## 11) Deploy & runtime
-
-* Bibliotheek pad bekend maken:
-
-  * Linux: `LD_LIBRARY_PATH` of absoluut pad.
-  * macOS: `DYLD_LIBRARY_PATH`.
-  * Windows: map met `delta1.dll` in `PATH` of zelfde dir als PHP bin.
-* Eén artefact per release; versies via bestandsnaam of symlink `current`.
-
----
-
-## 12) Troubleshooting
-
-| Symptoom                         | Oorzaak                     | Fix                                 |
-| -------------------------------- | --------------------------- | ----------------------------------- |
-| `FFI\ParserException`            | Header/typedef fout         | Corrigeer C-prototypes; puntkomma’s |
-| `undefined symbol: delta1_infer` | Naam-mangling of andere lib | `#[no_mangle]`, juiste lib laden    |
-| Segfault bij infer               | Ptr niet vrijgegeven        | Altijd `delta1_free_str()`          |
-| “Cannot load library”            | Pad/rechten/loader-var      | Absoluut pad, env var, rechten      |
-| Hang/lock                        | Globale mutable state       | Vermijd; gebruik `Mutex/RwLock`     |
-
----
-
-## 13) Minimale integratieflow (PHP)
-
-```php
-$ds = delta1_data_ingest('/data/input.csv', '{"type":"csv"}');
-if ($ds === 0) { /* afhandelen */ }
-
-$model = delta1_train($ds, '{"lr":0.01,"epochs":3}');
-$out   = delta1_infer($model, '{"x":[1,2,3]}');
-$json  = json_decode($out, true, flags: JSON_THROW_ON_ERROR);
-```
