@@ -1,0 +1,3 @@
+target/
+Cargo.lock
+# TODO: Extend ignore rules when additional tooling (coverage, benches) is added.
