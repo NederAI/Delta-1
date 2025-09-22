@@ -13,7 +13,7 @@ De map `rust-core/` bevat de centrale crate die alle domeinen bundelt. De crate 
 #### Orchestratie (`src/lib.rs`)
 
 * Declareert de modules `api`, `common`, `data`, `evaluation`, `inference` en `training`.
-* Re-exporteert de belangrijkste servicefuncties (`data::service::ingest_file`, `training::service::{train, load_model}`, `inference::service::infer`) zodat interne consumers één façade kunnen gebruiken.
+* Re-exporteert de belangrijkste servicefuncties (`data::service::ingest_file` als `core_data_ingest`, `training::service::{train, load_model, export_model_card}` en `inference::service::{infer_with_ctx, register_active_model}`) zodat interne consumers één façade kunnen gebruiken.
 * Vormt het startpunt voor het opzetten van repositories en configuratie wanneer de bootstrap-sequentie wordt toegevoegd.
 
 #### Gemeenschappelijke bouwstenen (`src/common/`)
@@ -21,22 +21,23 @@ De map `rust-core/` bevat de centrale crate die alle domeinen bundelt. De crate 
 * `config.rs` laadt runtimeconfiguratie zoals `DELTA1_DATA_ROOT`, regio en logniveau.
 * `error.rs` definieert het `DeltaError`/`DeltaResult`-model met stabiele `DeltaCode`-waarden die over de FFI-grens kunnen.
 * `ids.rs` bevat de deterministische `SimpleHash` waarmee dataset- en modelidentifiers worden afgeleid.
+* `json.rs` levert mini-helpers voor stringescaping en het uitlezen van velden zonder externe parser.
 * `time.rs` en `log.rs` leveren respectievelijk tijd- en logginghulpmiddelen met JSON-logging.
 * `buf.rs` biedt een herbruikbare bytebuffer voor IO-intensieve paden.
 
 #### Domeinen
 
 * **`data/`** – beheert datasetmetadata.
-  * `domain.rs` beschrijft `Dataset`, `DatasetId` en de `DataRepo`-trait.
-  * `service.rs` voert bestandsingestie uit: leest regels, normaliseert/hasht ze met `SimpleHash` en bouwt een `DatasetId`.
+  * `domain.rs` beschrijft `Dataset`, `DatasetId` (string wrappers) en de `DataRepo`-trait.
+  * `service.rs` voert bestandsingestie uit: leest regels, normaliseert/hasht ze met `SimpleHash`, bouwt een `DatasetId` en kan een datasheet exporteren.
   * `repo_fs.rs` implementeert een bestandenopslag op basis van `AppCfg::data_root` (met TODO’s voor vollediger metadataherstel).
 * **`training/`** – verzorgt modelversies en artefacten.
   * `domain.rs` definieert `ModelId`, `ModelVersion`, `TrainConfig` en de `ModelRepo`/`Trainer`-interfaces.
-  * `service.rs` combineert dataset-id en configuratie om een deterministische `ModelId` te berekenen; `load_model` is de plaats waar het ophalen van artefacten wordt aangesloten.
+  * `service.rs` combineert dataset-id en configuratie om een deterministische `ModelId` te berekenen, voert DP- en fairness-gates uit, registreert versies en exporteert modelkaarten.
   * `repo_fs.rs` schrijft artefact-headers weg in het `models/`-pad en vormt de basis voor versiebeheer.
 * **`inference/`** – levert synchron en batch-inferentie.
-  * `domain.rs` modelleert `Prediction` en de `InferEngine`-trait.
-  * `service.rs` verwerkt verzoeken, meet latency (`time::now_ms`) en construeert JSON-antwoordpayloads.
+  * `domain.rs` modelleert `Prediction`, routerregels en de `InferEngine`-trait.
+  * `service.rs` registreert het actieve model, voert consent- en routerchecks uit, meet latency (`time::now_ms`) en construeert JSON-antwoordpayloads met WhyLog-hash.
   * `workers.rs` introduceert een lichte threadpool (`Pool`) voor CPU-intensieve taken.
 * **`evaluation/`** – groepeert evaluatie- en driftfunctionaliteit.
   * `domain.rs` definieert `EvalSuite`, `DriftStats` en de `EvalRepo`-trait.
@@ -45,20 +46,21 @@ De map `rust-core/` bevat de centrale crate die alle domeinen bundelt. De crate 
 #### Publieke API (`src/api/`)
 
 * `mod.rs` groepeert publiek beschikbare bindingen.
-* `ffi.rs` exporteert de functies `delta1_api_version`, `delta1_data_ingest`, `delta1_train`, `delta1_infer` en `delta1_free_str` met een C-ABI. Pointers worden zorgvuldig gecontroleerd op null en resultaten worden vertaald naar simpele retourcodes of JSON.
+* `ffi.rs` exporteert de functies `delta1_api_version`, `delta1_data_ingest`, `delta1_train`, `delta1_load_model`, `delta1_infer_with_ctx`, `delta1_export_model_card`, `delta1_export_datasheet` en `delta1_free_str` met een C-ABI. Pointers worden zorgvuldig gecontroleerd op null en resultaten worden vertaald naar stabiele `DeltaCode`-waarden of JSON.
 
 #### Gegevens- en modelstroom
 
-1. **Dataset-ingestie** – `delta1_data_ingest` roept `data::service::ingest_file` aan, genereert een hash-gebaseerde `DatasetId` en (TODO) persisteert metadata via `DataRepo`.
-2. **Training** – `delta1_train` zet de dataset-id om naar `DatasetId` en produceert via `training::service::train` een deterministische `ModelId`; persistente opslag volgt via `ModelRepo` zodra geïmplementeerd.
-3. **Inferentie** – `delta1_infer` laadt (TODO) het model via `training::service::load_model` en verwerkt voorspellingen in `inference::service::infer`, dat latencies meet en een JSON-resultaat terugstuurt.
-4. **Evaluatie** – `evaluation::service::evaluate` en `drift` vormen de basis voor kwaliteits- en driftmonitoring op `ModelVersion`-niveau.
+1. **Dataset-ingestie** – `delta1_data_ingest` roept `data::service::ingest_file` aan, genereert een hash-gebaseerde `DatasetId` en kan via `delta1_export_datasheet` een datasheet leveren (persistente opslag volgt via `DataRepo`).
+2. **Training** – `delta1_train` zet de dataset-id om naar `DatasetId`, voert DP/fairness-gates uit en produceert via `training::service::train` een deterministische `ModelId`; `delta1_export_model_card` levert de bijhorende governance-documentatie.
+3. **Model-activatie** – `delta1_load_model` haalt het (laatste of gevraagde) model op via `training::service::load_model` en registreert het voor inferentie.
+4. **Inferentie** – `delta1_infer_with_ctx` verwerkt voorspellingen in `inference::service::infer_with_ctx`, past consent/routing toe, meet latencies en stuurt JSON-resultaten (inclusief WhyLog-hash) terug.
+5. **Evaluatie** – `evaluation::service::evaluate` en `drift` vormen de basis voor kwaliteits- en driftmonitoring op `ModelVersion`-niveau.
 
 ### PHP-FFI laag (`php-interface/`)
 
 De PHP-laag vormt een dunne schil rond de Rust-bibliotheek:
 
-* `src/bootstrap.php` declareert de C-header via `FFI::cdef()` en laadt `libdelta1.so`.
+* `src/bootstrap.php` schetst hoe de `delta1_*`-prototypes via `FFI::cdef()` gedeclareerd worden en hoe `libdelta1.so` geladen wordt.
 * `src/DataService.php` biedt een objectgeoriënteerde façade die de FFI-aanroepen verpakt zodat applicatiecode geen pointers hoeft te beheren.
 * `src/Database.php` levert een lichte PDO-wrapper met named parameters voor opslag.
 * `public/index.php` demonstreert hoe HTTP-endpoints (zonder frameworks) direct de services kunnen aanroepen.
@@ -109,6 +111,7 @@ Delta-1/
 │       │   ├── config.rs
 │       │   ├── error.rs
 │       │   ├── ids.rs
+│       │   ├── json.rs
 │       │   ├── log.rs
 │       │   └── time.rs
 │       ├── data/
