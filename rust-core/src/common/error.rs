@@ -9,14 +9,16 @@
 pub enum DeltaCode {
     /// Success code used as a sentinel.
     Ok = 0,
+    /// Consent check failed for the provided subject/purpose.
+    NoConsent = 1,
+    /// Policy guardrail denied the operation.
+    PolicyDenied = 2,
+    /// Requested model artefact was not available.
+    ModelMissing = 3,
     /// Input failed validation.
-    InvalidInput = 10,
-    /// IO layer failure (filesystem, permissions, etc).
-    Io = 20,
-    /// Entity was not found in the requested backing store.
-    NotFound = 30,
+    InvalidInput = 4,
     /// Catch-all for bugs and unimplemented paths.
-    Internal = 50,
+    Internal = 5,
 }
 
 /// Canonical error type for the core.
@@ -37,24 +39,34 @@ impl DeltaError {
         Self { code, msg }
     }
 
-    /// IO error helper.
-    pub const fn io() -> Self {
-        Self::new(DeltaCode::Io, "io")
-    }
-
     /// Validation helper.
     pub const fn invalid(msg: &'static str) -> Self {
         Self::new(DeltaCode::InvalidInput, msg)
     }
 
-    /// Not found helper.
-    pub const fn not_found(msg: &'static str) -> Self {
-        Self::new(DeltaCode::NotFound, msg)
+    /// Policy helper.
+    pub const fn policy_denied(msg: &'static str) -> Self {
+        Self::new(DeltaCode::PolicyDenied, msg)
+    }
+
+    /// Consent helper.
+    pub const fn no_consent() -> Self {
+        Self::new(DeltaCode::NoConsent, "no_consent")
+    }
+
+    /// Model missing helper.
+    pub const fn model_missing(msg: &'static str) -> Self {
+        Self::new(DeltaCode::ModelMissing, msg)
     }
 
     /// Internal error helper.
     pub const fn internal(msg: &'static str) -> Self {
         Self::new(DeltaCode::Internal, msg)
+    }
+
+    /// IO error helper (mapped to internal until dedicated code exists).
+    pub const fn io() -> Self {
+        Self::internal("io")
     }
 
     /// Temporary helper until the real implementation lands.
@@ -71,9 +83,10 @@ mod tests {
     #[test]
     fn codes_are_stable() {
         assert_eq!(DeltaCode::Ok as u32, 0);
-        assert_eq!(DeltaCode::InvalidInput as u32, 10);
-        assert_eq!(DeltaCode::Io as u32, 20);
-        assert_eq!(DeltaCode::NotFound as u32, 30);
-        assert_eq!(DeltaCode::Internal as u32, 50);
+        assert_eq!(DeltaCode::NoConsent as u32, 1);
+        assert_eq!(DeltaCode::PolicyDenied as u32, 2);
+        assert_eq!(DeltaCode::ModelMissing as u32, 3);
+        assert_eq!(DeltaCode::InvalidInput as u32, 4);
+        assert_eq!(DeltaCode::Internal as u32, 5);
     }
 }

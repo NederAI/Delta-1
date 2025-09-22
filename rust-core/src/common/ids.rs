@@ -24,6 +24,23 @@ impl SimpleHash {
     pub fn finish32(&self) -> u32 {
         self.0
     }
+
+    /// Finalise the hash and return an 8-character lowercase hex string.
+    pub fn finish_hex(&self) -> String {
+        format!("{self:08x}", self = self.0)
+    }
+
+    /// Finalise the hash and return a 64-character lowercase hex string.
+    pub fn finish_hex64(&self) -> String {
+        let mut state = self.0;
+        let mut out = String::with_capacity(64);
+        for i in 0..8 {
+            state = state.rotate_left(5).wrapping_add(0x9E37_79B9)
+                ^ ((i as u32).wrapping_mul(0x85EB_CA6B));
+            out.push_str(&format!("{state:08x}"));
+        }
+        out
+    }
 }
 
 impl Default for SimpleHash {

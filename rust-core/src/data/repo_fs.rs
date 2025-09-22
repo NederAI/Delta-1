@@ -24,8 +24,8 @@ impl FsDataRepo {
         }
     }
 
-    fn metadata_path(&self, id: DatasetId) -> PathBuf {
-        self.root.join(format!("{}.meta", id.raw()))
+    fn metadata_path(&self, id: &DatasetId) -> PathBuf {
+        self.root.join(format!("{}.meta", id.as_str()))
     }
 
     fn ensure_dirs(&self) -> io::Result<()> {
@@ -36,7 +36,7 @@ impl FsDataRepo {
 impl DataRepo for FsDataRepo {
     fn put_dataset(&self, dataset: &Dataset) -> DeltaResult<()> {
         self.ensure_dirs().map_err(|_| DeltaError::io())?;
-        let path = self.metadata_path(dataset.id);
+        let path = self.metadata_path(&dataset.id);
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -47,7 +47,7 @@ impl DataRepo for FsDataRepo {
         writeln!(
             file,
             "id={};created_ms={};rows={};schema={}",
-            dataset.id.raw(),
+            dataset.id.as_str(),
             dataset.created_ms,
             dataset.rows,
             dataset.schema.definition_json
@@ -59,9 +59,9 @@ impl DataRepo for FsDataRepo {
     }
 
     fn get_dataset(&self, id: DatasetId) -> DeltaResult<Dataset> {
-        let path = self.metadata_path(id);
+        let path = self.metadata_path(&id);
         if !Path::new(&path).exists() {
-            return Err(DeltaError::not_found("dataset"));
+            return Err(DeltaError::model_missing("dataset"));
         }
         // TODO: Parse metadata files properly instead of returning a placeholder.
         Err(DeltaError::not_implemented("FsDataRepo::get_dataset"))
