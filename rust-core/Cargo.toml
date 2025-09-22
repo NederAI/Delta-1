@@ -1,9 +1,15 @@
-﻿[package]
-name = \"delta1\"
-version = \"0.1.0\"
-edition = \"2021\"
+[package]
+name = "delta1"
+version = "0.1.0"
+edition = "2021"
 
 [lib]
-crate-type = [\"cdylib\"]
+crate-type = ["cdylib"]
 
 [dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+# TODO: Evaluate opt-level tweaks once performance targets are known.
